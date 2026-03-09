@@ -1,0 +1,53 @@
+name: Coverage Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test-and-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Run tests and JaCoCo
+        run: |
+          mvn -q clean test jacoco:report
+
+      - name: Enforce 80% line + branch coverage
+        shell: bash
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          p = Path('target/site/jacoco/jacoco.xml')
+          if not p.exists():
+              raise SystemExit('jacoco.xml not found')
+
+          root = ET.parse(p).getroot()
+          line_cov = branch_cov = None
+          for c in root.findall('counter'):
+              t = c.attrib['type']
+              covered = int(c.attrib['covered'])
+              missed = int(c.attrib['missed'])
+              total = covered + missed
+              pct = 100.0 if total == 0 else (covered / total) * 100
+              if t == 'LINE':
+                  line_cov = pct
+              if t == 'BRANCH':
+                  branch_cov = pct
+
+          print(f'Line coverage: {line_cov:.2f}%')
+          print(f'Branch coverage: {branch_cov:.2f}%')
+          if line_cov < 80 or branch_cov < 80:
+              raise SystemExit('Coverage gate failed: requires >= 80% line and branch')
+          PY

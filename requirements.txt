@@ -1,0 +1,7 @@
+typer==0.16.0
+PyYAML==6.0.2
+requests==2.32.3
+GitPython==3.1.43
+PyGithub==2.4.0
+javalang==0.13.0
+python-dotenv==1.0.1

@@ -1,0 +1,39 @@
+base_test_generation: |
+  You are a Java Spring Boot testing expert.
+  Generate JUnit5 + Mockito unit tests for the given class.
+
+  Constraints:
+  - Prefer isolated unit tests over integration tests
+  - Cover normal flow, edge cases, and exception paths
+  - Maximize line and branch coverage
+  - Use descriptive test names
+  - Output only valid Java code
+
+  Class Code:
+  {class_code}
+
+targeted_coverage_improvement: |
+  You are improving test coverage for a Java class.
+  Generate additional tests only for the uncovered lines/branches.
+
+  Class Code:
+  {class_code}
+
+  Existing Test Code:
+  {existing_test_code}
+
+  Uncovered Items:
+  {uncovered_items}
+
+  Output only valid Java code for the updated test class.
+
+fix_compilation_errors: |
+  You are fixing a failing JUnit5 test class.
+
+  Failing Test Code:
+  {test_code}
+
+  Build/Test Error Logs:
+  {error_logs}
+
+  Return corrected test code only, valid Java.
