@@ -2,14 +2,20 @@ workspace_dir: "./workspace"
 output_dir: "./output"
 reports_dir: "./output/reports"
 generated_tests_dir: "./output/generated_tests"
+runtime_artifacts_dir: "./runtime_artifacts"
 min_line_coverage: 80.0
 min_branch_coverage: 80.0
 max_retry_rounds: 3
+test_fix_attempts: 2
 maven_test_cmd: "mvn -q clean test"
 maven_jacoco_cmd: "mvn -q jacoco:report"
+gradle_test_cmd: "gradle -q test"
+gradle_jacoco_cmd: "gradle -q jacocoTestReport"
 qwen:
   api_base: "https://your-qwen-endpoint/v1"
   model: "qwen-max"
-  timeout_seconds: 90
+  timeout_seconds: 300
   temperature: 0.2
   max_tokens: 2048
+  auth_method: ""   # BEARER, S2B, B2B
+  user: ""          # Required for S2B/B2B gateway flows

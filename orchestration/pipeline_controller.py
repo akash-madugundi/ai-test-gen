@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 from typing import Any
 
 import yaml
@@ -19,9 +20,9 @@ from input_handlers.local_repo_loader import load_local_repo
 from orchestration.retry_manager import should_retry
 from repo_analyzer.dependency_mapper import filter_target_classes
 from repo_analyzer.java_parser import JavaClassInfo, extract_java_classes
-from repo_analyzer.spring_context_detector import detect_build_system, detect_spring_boot
+from repo_analyzer.spring_context_detector import detect_build_system
 from test_processor.flaky_test_detector import looks_flaky
-from test_processor.test_cleaner import normalize_generated_test
+from test_processor.test_cleaner import enforce_expected_class_name, normalize_generated_test
 from utils.file_utils import ensure_dir, read_text, write_text
 from utils.logger import get_logger
 
@@ -40,13 +41,12 @@ class PipelineController:
             timeout_seconds=qcfg["timeout_seconds"],
             temperature=qcfg["temperature"],
             max_tokens=qcfg["max_tokens"],
+            user=qcfg.get("user"),
+            auth_method=qcfg.get("auth_method", ""),
         )
         self.generator = AITestGenerator(self.qwen, self.prompt_builder)
         self.refiner = AITestRefiner(self.qwen, self.prompt_builder)
-        self.maven = MavenRunner(
-            test_cmd=self.config["maven_test_cmd"],
-            jacoco_cmd=self.config["maven_jacoco_cmd"],
-        )
+        self.maven: MavenRunner | None = None
 
     def _load_yaml(self, path: Path) -> dict[str, Any]:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -59,27 +59,55 @@ class PipelineController:
             return load_local_repo(Path(local_path).resolve(), workspace)
         raise ValueError("Either github_url or local_path must be set")
 
+    def _generated_test_class_name(self, class_info: JavaClassInfo) -> str:
+        # Dedicated suffix prevents collision with manually written tests.
+        return f"{class_info.class_name}AiGeneratedTest"
+
     def _test_path_for_class(self, repo_dir: Path, class_info: JavaClassInfo) -> Path:
         src_path = str(class_info.source_path).replace("\\", "/")
         marker = "/src/main/java/"
+        generated_name = self._generated_test_class_name(class_info)
         if marker not in src_path:
-            return repo_dir / "src" / "test" / "java" / f"{class_info.class_name}Test.java"
+            return repo_dir / "src" / "test" / "java" / f"{generated_name}.java"
 
         suffix = src_path.split(marker, 1)[1]
-        target_suffix = suffix.replace(f"{class_info.class_name}.java", f"{class_info.class_name}Test.java")
+        target_suffix = suffix.replace(f"{class_info.class_name}.java", f"{generated_name}.java")
         return repo_dir / "src" / "test" / "java" / target_suffix
 
+    def _artifact_root(self, repo_dir: Path) -> Path:
+        artifacts_dir = self.config.get("runtime_artifacts_dir", "./runtime_artifacts")
+        return ensure_dir((self.root_dir / artifacts_dir / repo_dir.name).resolve())
+
+    def _artifact_test_cache_path(self, repo_dir: Path, class_info: JavaClassInfo) -> Path:
+        package_path = class_info.package_name.replace(".", "/") if class_info.package_name else "default"
+        return self._artifact_root(repo_dir) / "tests_cache" / package_path / f"{self._generated_test_class_name(class_info)}.java"
+
+    def _write_log(self, repo_dir: Path, filename: str, content: str) -> Path:
+        log_path = self._artifact_root(repo_dir) / "logs" / filename
+        write_text(log_path, content)
+        return log_path
+
     def _write_generated_test(self, repo_dir: Path, class_info: JavaClassInfo, test_code: str) -> Path:
+        expected_class_name = self._generated_test_class_name(class_info)
         cleaned = normalize_generated_test(test_code)
+        cleaned = enforce_expected_class_name(cleaned, expected_class_name)
         test_path = self._test_path_for_class(repo_dir, class_info)
         write_text(test_path, cleaned)
+        write_text(self._artifact_test_cache_path(repo_dir, class_info), cleaned)
         return test_path
 
-    def _parse_coverage(self, repo_dir: Path) -> CoverageSummary:
-        jacoco_xml = repo_dir / "target" / "site" / "jacoco" / "jacoco.xml"
-        if not jacoco_xml.exists():
-            raise FileNotFoundError("JaCoCo XML not found. Ensure jacoco-maven-plugin is configured.")
-        return parse_jacoco_xml(jacoco_xml)
+    def _parse_coverage(self, repo_dir: Path, build_system: str) -> CoverageSummary | None:
+        candidates: list[Path] = []
+        if build_system == "maven":
+            candidates.append(repo_dir / "target" / "site" / "jacoco" / "jacoco.xml")
+        if build_system == "gradle":
+            candidates.append(repo_dir / "build" / "reports" / "jacoco" / "test" / "jacocoTestReport.xml")
+            candidates.append(repo_dir / "build" / "reports" / "jacoco" / "test" / "jacocoTestReport" / "jacocoTestReport.xml")
+
+        for jacoco_xml in candidates:
+            if jacoco_xml.exists():
+                return parse_jacoco_xml(jacoco_xml)
+        return None
 
     def run(
         self,
@@ -90,12 +118,22 @@ class PipelineController:
         base_branch: str = "main",
         push_branch: bool = False,
     ) -> dict[str, Any]:
+        start_ts = time.perf_counter()
         repo_dir = self._resolve_repo(github_url, local_path)
 
-        if not detect_spring_boot(repo_dir):
-            logger.warning("Spring Boot not clearly detected; proceeding anyway")
-        if detect_build_system(repo_dir) != "maven":
-            raise ValueError("Current version supports Maven projects only")
+        build_system = detect_build_system(repo_dir)
+        if build_system == "maven":
+            self.maven = MavenRunner(
+                test_cmd=self.config["maven_test_cmd"],
+                jacoco_cmd=self.config["maven_jacoco_cmd"],
+            )
+        elif build_system == "gradle":
+            self.maven = MavenRunner(
+                test_cmd=self.config.get("gradle_test_cmd", "gradle -q test"),
+                jacoco_cmd=self.config.get("gradle_jacoco_cmd", "gradle -q jacocoTestReport"),
+            )
+        else:
+            raise ValueError("Only Java Maven/Gradle projects are supported")
 
         branch_name = None
         if github_url:
@@ -107,7 +145,12 @@ class PipelineController:
 
         generated_paths: list[str] = []
         for cls in target_classes:
-            generated = self.generator.generate_for_class(cls)
+            cache_path = self._artifact_test_cache_path(repo_dir, cls)
+            if cache_path.exists():
+                generated = read_text(cache_path)
+                logger.info("Using cached generated test for %s", cls.class_name)
+            else:
+                generated = self.generator.generate_for_class(cls)
             if looks_flaky(generated):
                 logger.warning("Potential flaky test generated for %s", cls.class_name)
             file_path = self._write_generated_test(repo_dir, cls, generated)
@@ -115,27 +158,64 @@ class PipelineController:
 
         # Run test + coverage loop.
         max_rounds = int(self.config["max_retry_rounds"])
+        test_fix_attempts = int(self.config.get("test_fix_attempts", 2))
         round_idx = 1
         summary = CoverageSummary(0.0, 0.0, [])
 
         while True:
             test_result = self.maven.run_tests(repo_dir)
+            self._write_log(
+                repo_dir,
+                f"round-{round_idx}-mvn-test.log",
+                (test_result.stdout or "") + "\n" + (test_result.stderr or ""),
+            )
             if not test_result.ok:
-                # Simple refinement: attempt one global fix by asking LLM with logs.
                 logger.warning("Tests failing in round %s; attempting refinement", round_idx)
-                for p in generated_paths:
-                    pth = Path(p)
-                    fixed = self.refiner.fix_test_code(read_text(pth), test_result.stderr[-4000:])
-                    write_text(pth, normalize_generated_test(fixed))
-                test_result = self.maven.run_tests(repo_dir)
-                if not test_result.ok and not should_retry(round_idx, max_rounds):
-                    raise RuntimeError(f"Tests failed after retries:\n{test_result.stderr}")
+                for fix_attempt in range(1, test_fix_attempts + 1):
+                    for p in generated_paths:
+                        pth = Path(p)
+                        fixed = self.refiner.fix_test_code(read_text(pth), test_result.stderr[-5000:])
+                        cls_name = pth.stem
+                        fixed = enforce_expected_class_name(normalize_generated_test(fixed), cls_name)
+                        write_text(pth, fixed)
+                    test_result = self.maven.run_tests(repo_dir)
+                    self._write_log(
+                        repo_dir,
+                        f"round-{round_idx}-mvn-test-fix-{fix_attempt}.log",
+                        (test_result.stdout or "") + "\n" + (test_result.stderr or ""),
+                    )
+                    if test_result.ok:
+                        break
+
+                if not test_result.ok:
+                    if should_retry(round_idx, max_rounds):
+                        round_idx += 1
+                        continue
+                    raise RuntimeError(
+                        "Tests still failing after retries. Check runtime_artifacts logs under this repository run."
+                    )
 
             jacoco_result = self.maven.run_jacoco_report(repo_dir)
+            self._write_log(
+                repo_dir,
+                f"round-{round_idx}-jacoco.log",
+                (jacoco_result.stdout or "") + "\n" + (jacoco_result.stderr or ""),
+            )
             if not jacoco_result.ok:
-                raise RuntimeError(f"jacoco:report failed:\n{jacoco_result.stderr}")
+                logger.warning("jacoco report command failed in round %s", round_idx)
+                if should_retry(round_idx, max_rounds):
+                    round_idx += 1
+                    continue
+                break
 
-            summary = self._parse_coverage(repo_dir)
+            summary_or_none = self._parse_coverage(repo_dir, build_system)
+            if summary_or_none is None:
+                logger.warning("JaCoCo XML not found after tests. Retrying before finalizing.")
+                if should_retry(round_idx, max_rounds):
+                    round_idx += 1
+                    continue
+                break
+            summary = summary_or_none
             if is_coverage_met(
                 summary,
                 float(self.config["min_line_coverage"]),
@@ -158,7 +238,12 @@ class PipelineController:
                     existing_test_code=existing,
                     uncovered_items=uncovered,
                 )
-                write_text(path, normalize_generated_test(improved))
+                improved = enforce_expected_class_name(
+                    normalize_generated_test(improved),
+                    self._generated_test_class_name(cls),
+                )
+                write_text(path, improved)
+                write_text(self._artifact_test_cache_path(repo_dir, cls), improved)
 
             round_idx += 1
 
@@ -174,11 +259,13 @@ class PipelineController:
                     raise ValueError("Branch name unavailable for PR creation")
                 pr_url = create_pull_request(
                     repo_full_name=repo_full_name,
-                    title="test: AI-generated Spring Boot unit tests",
+                    title="test: AI-generated Java unit tests",
                     body="Automated by ai-test-generator using Qwen and coverage feedback loop.",
                     head_branch=branch_name,
                     base_branch=base_branch,
                 )
+
+        elapsed_seconds = round(time.perf_counter() - start_ts, 2)
 
         return {
             "repo_dir": str(repo_dir),
@@ -187,4 +274,6 @@ class PipelineController:
             "branch_coverage": summary.branch_coverage,
             "pr_url": pr_url,
             "branch_name": branch_name,
+            "build_system": build_system,
+            "elapsed_seconds": elapsed_seconds,
         }

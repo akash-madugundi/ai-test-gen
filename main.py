@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from orchestration.pipeline_controller import PipelineController
 from utils.logger import get_logger
 
-app = typer.Typer(help="AI Spring Boot test generation using Qwen")
+app = typer.Typer(help="AI Java test generation using Qwen")
 logger = get_logger(__name__)
 
 # Load .env from project root so QWEN_API_KEY and GITHUB_TOKEN are available.
@@ -37,9 +37,11 @@ def run(
 
     logger.info("Generation complete")
     logger.info("Repo Dir: %s", result["repo_dir"])
+    logger.info("Build System: %s", result.get("build_system", "unknown"))
     logger.info("Generated Files: %s", len(result["generated_test_files"]))
     logger.info("Line Coverage: %.2f%%", result["line_coverage"])
     logger.info("Branch Coverage: %.2f%%", result["branch_coverage"])
+    logger.info("Elapsed Time: %.2fs", result.get("elapsed_seconds", 0.0))
     if result.get("branch_name"):
         logger.info("Branch: %s", result["branch_name"])
     if result.get("pr_url"):

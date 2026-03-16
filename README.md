@@ -1,13 +1,16 @@
-# AI Test Generator (Qwen + Spring Boot)
+# AI Test Generator (Qwen + Java)
 
-Automates JUnit test generation for Spring Boot repositories using Qwen, then enforces line and branch coverage goals (>=80%).
+Automates JUnit test generation for Java repositories (Maven/Gradle) using Qwen, then enforces line and branch coverage goals (>=80%).
 
 ## Features
 
 - Input type 1: GitHub URL (`--github-url`)
 - Input type 2: Local repository path (`--local-path`)
 - Generates tests with Qwen for target classes
-- Runs `mvn test` and `jacoco:report`
+- Supports Maven and Gradle Java projects
+- Preserves manual tests by generating dedicated `AiGeneratedTest` classes
+- Stores execution logs and test cache under `runtime_artifacts/`
+- Reuses cached generated tests across reruns to avoid starting from scratch
 - Coverage retry loop to improve uncovered areas
 - Optional branch commit and PR creation for GitHub repos
 
@@ -53,6 +56,7 @@ ai-test-generator/
   output/
     generated_tests/
     reports/
+  runtime_artifacts/
   .github/workflows/
     coverage-gate.yml
   main.py
@@ -63,14 +67,19 @@ ai-test-generator/
 
 - Python 3.11+
 - Java 17/21
-- Maven
+- Maven or Gradle
 - For PR mode: GitHub token with repo scope
-- Qwen API endpoint and key
+- Qwen API endpoint and auth
 
 ## Environment Variables
 
-- `QWEN_API_KEY`: API key for your org Qwen endpoint
-- `GITHUB_TOKEN`: required only for PR creation
+- `QWEN_API_KEY`: for `BEARER` auth mode
+- `AUTH_METHOD`: `BEARER`, `S2B`, or `B2B`
+- `AIGW_USER`: required for `S2B` and `B2B`
+- `AMTOKEN`: required for `S2B`
+- `JWT`: required for `B2B`
+- `GITHUB_TOKEN`: required for private clone/push/PR flows
+- `GITHUB_BASE_URL`: optional, set only for GitHub Enterprise API base URL
 
 ## Setup
 
@@ -98,12 +107,13 @@ python main.py --github-url "https://github.com/<owner>/<repo>.git" --push-branc
 ### 2) Local input (copy local repo and generate tests)
 
 ```powershell
-python main.py --local-path "D:\path\to\spring-boot-repo"
+python main.py --local-path "D:\path\to\java-repo"
 ```
 
 ## Notes
 
-- Current implementation targets Maven projects.
-- Ensure JaCoCo plugin is present in target repository `pom.xml`.
-- Generated tests are written under copied/cloned repo `src/test/java`.
+- Ensure JaCoCo plugin/tasks are present in target build configuration.
+- Generated AI tests are written under copied/cloned repo `src/test/java` with `AiGeneratedTest` suffix.
+- If `mvn/gradle test` fails, logs are saved in `runtime_artifacts/<repo>/logs` and auto-fix retries are attempted.
+- If JaCoCo XML is missing, the pipeline retries before finalizing instead of crashing immediately.
 - Coverage goal defaults are in `config/app_config.yaml`.
