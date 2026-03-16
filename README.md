@@ -117,3 +117,8 @@ python main.py --local-path "D:\path\to\java-repo"
 - If `mvn/gradle test` fails, logs are saved in `runtime_artifacts/<repo>/logs` and auto-fix retries are attempted.
 - If JaCoCo XML is missing, the pipeline retries before finalizing instead of crashing immediately.
 - Coverage goal defaults are in `config/app_config.yaml`.
+
+
+
+https://github.com/robsonagapito/unit-testing-java.git
+https://github.com/in28minutes/spring-unit-testing-with-junit-and-mockito.git
